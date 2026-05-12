@@ -14,6 +14,7 @@ import io
 import json
 import math
 import random
+import hashlib
 import datetime
 import base64 as b64
 
@@ -593,19 +594,157 @@ def generate_share_image(pil_image: Image.Image, karte: dict, diag_no: int) -> I
     return canvas
 
 
+# ==================== USAGE TRACKING ====================
+
+MONTHLY_LIMIT = 3
+
+
+@st.cache_resource
+def _get_sb():
+    url = st.secrets.get("SUPABASE_URL", "")
+    key = st.secrets.get("SUPABASE_SERVICE_KEY", "")
+    if not (url and key):
+        return None
+    try:
+        from supabase import create_client
+        return create_client(url, key)
+    except Exception:
+        return None
+
+
+def _get_ip_hash() -> str:
+    try:
+        headers = dict(st.context.headers)
+        for h in ("x-forwarded-for", "x-real-ip", "cf-connecting-ip"):
+            val = headers.get(h, "")
+            if val:
+                raw = val.split(",")[0].strip()
+                return hashlib.sha256(raw.encode()).hexdigest()[:20]
+    except Exception:
+        pass
+    return "local"
+
+
+def _this_month() -> str:
+    return datetime.date.today().strftime("%Y-%m")
+
+
+def _get_usage(sb, ip_hash: str) -> int:
+    if not sb or ip_hash == "local":
+        return 0
+    try:
+        r = sb.table("usage").select("count").eq("ip_hash", ip_hash).eq("month", _this_month()).execute()
+        return r.data[0]["count"] if r.data else 0
+    except Exception:
+        return 0
+
+
+def _inc_usage(sb, ip_hash: str):
+    if not sb or ip_hash == "local":
+        return
+    m = _this_month()
+    try:
+        r = sb.table("usage").select("count").eq("ip_hash", ip_hash).eq("month", m).execute()
+        if r.data:
+            sb.table("usage").update({"count": r.data[0]["count"] + 1}).eq("ip_hash", ip_hash).eq("month", m).execute()
+        else:
+            sb.table("usage").insert({"ip_hash": ip_hash, "month": m, "count": 1}).execute()
+    except Exception:
+        pass
+
+
+def _is_premium(sb, ip_hash: str) -> bool:
+    if not sb or ip_hash == "local":
+        return True
+    try:
+        today = datetime.date.today().isoformat()
+        r = sb.table("premium_ips").select("id").eq("ip_hash", ip_hash).gte("expires_at", today).execute()
+        return len(r.data) > 0
+    except Exception:
+        return False
+
+
+def _activate_code(sb, ip_hash: str, code: str) -> bool:
+    if not sb:
+        return False
+    try:
+        r = sb.table("access_codes").select("*").eq("code", code.upper()).eq("used", False).execute()
+        if not r.data:
+            return False
+        sb.table("access_codes").update({"used": True, "activated_ip": ip_hash}).eq("code", code.upper()).execute()
+        expires = (datetime.date.today() + datetime.timedelta(days=31)).isoformat()
+        sb.table("premium_ips").insert({"ip_hash": ip_hash, "expires_at": expires, "code": code.upper()}).execute()
+        return True
+    except Exception:
+        return False
+
+
+def _show_paywall(sb, ip_hash: str):
+    stripe_link = st.secrets.get("STRIPE_LINK", "#")
+    st.markdown(f"""
+    <div style="background:{C_CARD}; border:2px solid {C_LIGHT}; border-radius:16px;
+                padding:2rem; text-align:center; margin:2rem 0;">
+        <div style="font-size:2.5rem; color:{C_ACCENT};">✦</div>
+        <div style="font-family:'Noto Serif JP',serif; font-size:1.3rem; color:{C_TEXT};
+                    font-weight:700; margin:0.6rem 0;">
+            今月の無料枠（{MONTHLY_LIMIT}回）を<br>使い切りました
+        </div>
+        <p style="color:{C_SUB}; font-size:0.85rem; margin:0.4rem 0 1.2rem;">
+            来月になると自動でリセットされます。<br>
+            今すぐ続けたい場合はプレミアムプランへどうぞ。
+        </p>
+        <div style="background:{C_BG}; border-radius:12px; padding:1.2rem; margin-bottom:1.4rem; text-align:left;">
+            <div style="font-size:1.7rem; font-weight:900; color:{C_ACCENT}; text-align:center;">
+                ¥980<span style="font-size:0.85rem; font-weight:400; color:{C_SUB};">/月</span>
+            </div>
+            <ul style="color:{C_TEXT}; font-size:0.85rem; line-height:2.1; margin:0.8rem 0 0; padding-left:1.2rem;">
+                <li>月間 <b>無制限</b> の顔面カルテ診断</li>
+                <li>パーソナルカラー・メイク詳細分析</li>
+                <li>垢抜けアドバイス全項目</li>
+            </ul>
+        </div>
+        <a href="{stripe_link}" target="_blank" style="
+            display:block; background:linear-gradient(90deg,{C_ACCENT},{C_LIGHT});
+            color:white; font-weight:900; font-size:1rem; padding:0.9rem;
+            border-radius:10px; text-decoration:none; margin-bottom:0.5rem;
+        ">✦ プレミアムに登録する</a>
+        <p style="color:{C_SUB}; font-size:0.75rem;">
+            ※ 登録後にアクセスコードをメールでお送りします
+        </p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    with st.expander("アクセスコードをお持ちの方"):
+        code_in = st.text_input("コードを入力", placeholder="XXXX-XXXX-XXXX", key="code_input")
+        if st.button("適用する", key="apply_code"):
+            if _activate_code(sb, ip_hash, code_in):
+                st.success("✓ プレミアムが有効になりました！")
+                st.rerun()
+            else:
+                st.error("コードが無効か、使用済みです。")
+
+
 # ==================== UI ====================
 
 def main():
     api_key = os.environ.get("ANTHROPIC_API_KEY", "") or st.secrets.get("ANTHROPIC_API_KEY", "")
     diag_no = random.randint(100000, 999999)
 
+    sb       = _get_sb()
+    ip_hash  = _get_ip_hash()
+    premium  = _is_premium(sb, ip_hash)
+    usage    = _get_usage(sb, ip_hash)
+    remaining = max(0, MONTHLY_LIMIT - usage) if not premium else None
+
     with st.sidebar:
-        st.markdown("### ✦ API Key 設定")
-        key_in = st.text_input("Anthropic API Key", type="password", value=api_key,
-                                help="sk-ant-xxxxx 形式。未入力でもフォールバック診断が動きます。")
-        if key_in:
-            api_key = key_in
-        st.success("設定済み ✓") if api_key else st.info("未設定 → フォールバック診断")
+        st.markdown("### ✦ 今月の残り回数")
+        if premium:
+            st.success("プレミアム会員 ✦ 無制限")
+        elif sb:
+            st.info(f"残り **{remaining}** 回 / 月{MONTHLY_LIMIT}回")
+            st.progress(max(0.0, 1.0 - usage / MONTHLY_LIMIT))
+        else:
+            st.info("無料プラン")
 
     # マガジンヘッダー
     st.markdown(f"""
@@ -619,23 +758,27 @@ def main():
     </div>
     """, unsafe_allow_html=True)
 
-    uploaded = st.file_uploader(
-        "顔写真をアップロード",
-        type=["jpg", "jpeg", "png", "webp"],
-        help="正面向き・明るい環境の写真が最適です",
-    )
+    if not premium and usage >= MONTHLY_LIMIT:
+        _show_paywall(sb, ip_hash)
+    else:
+        uploaded = st.file_uploader(
+            "顔写真をアップロード",
+            type=["jpg", "jpeg", "png", "webp"],
+            help="正面向き・明るい環境の写真が最適です",
+        )
 
-    if uploaded:
-        image = Image.open(uploaded)
-        st.image(image, use_container_width=True, caption="アップロード完了")
+        if uploaded:
+            image = Image.open(uploaded)
+            st.image(image, use_container_width=True, caption="アップロード完了")
 
-        if st.button("分析ガイドを作成する", type="primary", use_container_width=True):
-            with st.spinner("AIが分析中… 少々お待ちください"):
-                if not has_face(image):
-                    st.error("顔を検出できませんでした。正面向きの写真を使用してください。")
-                    return
-                karte = get_karte(image, api_key)
-            _display_karte(image, karte, diag_no)
+            if st.button("分析ガイドを作成する", type="primary", use_container_width=True):
+                with st.spinner("AIが分析中… 少々お待ちください"):
+                    if not has_face(image):
+                        st.error("顔を検出できませんでした。正面向きの写真を使用してください。")
+                        return
+                    karte = get_karte(image, api_key)
+                _inc_usage(sb, ip_hash)
+                _display_karte(image, karte, diag_no)
 
     st.markdown(
         '<div class="disclaimer">※ このアプリはエンターテインメント目的のAI診断です。医療行為ではありません。</div>',
