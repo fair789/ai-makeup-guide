@@ -618,14 +618,26 @@ def _get_or_create_uid(sb) -> str:
     """ブラウザCookieで永続ユーザーIDを取得・生成する。"""
     if not sb:
         return "local"
+
+    # 同一セッション内はキャッシュを返す
+    if "_maid" in st.session_state:
+        return st.session_state["_maid"]
+
     try:
         controller = CookieController()
         uid = controller.get("_maid")
         if uid:
+            st.session_state["_maid"] = uid
             return uid
+        # Cookieコンポーネントの初回レンダリング完了を待つ（1回だけ rerun）
+        if not st.session_state.get("_maid_init"):
+            st.session_state["_maid_init"] = True
+            st.rerun()
+        # 2回目のレンダリングでも未取得 → 新規ユーザー
         new_uid = hashlib.sha256(str(uuid.uuid4()).encode()).hexdigest()[:20]
         controller.set("_maid", new_uid)
-        st.stop()
+        st.session_state["_maid"] = new_uid
+        return new_uid
     except Exception:
         pass
     return "local"
@@ -686,7 +698,21 @@ def _activate_code(sb, ip_hash: str, code: str) -> bool:
 
 
 def _show_paywall(sb, ip_hash: str):
-    stripe_link = st.secrets.get("STRIPE_LINK", "#")
+    stripe_link = st.secrets.get("STRIPE_LINK", "")
+    has_stripe = bool(stripe_link and stripe_link != "#")
+
+    pay_button = (
+        f'<a href="{stripe_link}" target="_blank" style="'
+        f'display:block; background:linear-gradient(90deg,{C_ACCENT},{C_LIGHT});'
+        f'color:white; font-weight:900; font-size:1rem; padding:0.9rem;'
+        f'border-radius:10px; text-decoration:none; margin-bottom:0.5rem;'
+        f'">✦ プレミアムに登録する</a>'
+        if has_stripe else
+        f'<div style="background:#f0f0f0; color:#999; font-size:0.82rem;'
+        f'padding:0.9rem; border-radius:10px; margin-bottom:0.5rem; text-align:center;">'
+        f'決済ページ準備中 — アクセスコードをお持ちの方は下のフォームからどうぞ</div>'
+    )
+
     st.markdown(f"""
     <div style="background:{C_CARD}; border:2px solid {C_LIGHT}; border-radius:16px;
                 padding:2rem; text-align:center; margin:2rem 0;">
@@ -709,11 +735,7 @@ def _show_paywall(sb, ip_hash: str):
                 <li>垢抜けアドバイス全項目</li>
             </ul>
         </div>
-        <a href="{stripe_link}" target="_blank" style="
-            display:block; background:linear-gradient(90deg,{C_ACCENT},{C_LIGHT});
-            color:white; font-weight:900; font-size:1rem; padding:0.9rem;
-            border-radius:10px; text-decoration:none; margin-bottom:0.5rem;
-        ">✦ プレミアムに登録する</a>
+        {pay_button}
         <p style="color:{C_SUB}; font-size:0.75rem;">
             ※ 登録後にアクセスコードをメールでお送りします
         </p>
