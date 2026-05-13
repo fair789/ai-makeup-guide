@@ -18,11 +18,13 @@ import hashlib
 import datetime
 import base64 as b64
 
+import uuid
 import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 import streamlit as st
 import anthropic
+from streamlit_cookies_controller import CookieController
 
 MODEL  = "claude-sonnet-4-6"
 TODAY  = datetime.date.today().strftime("%Y.%m.%d")
@@ -612,24 +614,21 @@ def _get_sb():
         return None
 
 
-def _get_ip_hash() -> str:
+def _get_or_create_uid(sb) -> str:
+    """ブラウザCookieで永続ユーザーIDを取得・生成する。"""
+    if not sb:
+        return "local"
     try:
-        headers = dict(st.context.headers)
-        for h in ("x-forwarded-for", "x-real-ip", "cf-connecting-ip"):
-            val = headers.get(h, "")
-            if val:
-                raw = val.split(",")[0].strip()
-                return hashlib.sha256(raw.encode()).hexdigest()[:20]
+        controller = CookieController()
+        uid = controller.get("_maid")
+        if uid:
+            return uid
+        new_uid = hashlib.sha256(str(uuid.uuid4()).encode()).hexdigest()[:20]
+        controller.set("_maid", new_uid)
+        st.stop()
     except Exception:
         pass
-    # Supabaseが未設定のローカル開発環境のみ"local"を返す
-    if not (st.secrets.get("SUPABASE_URL", "") and st.secrets.get("SUPABASE_SERVICE_KEY", "")):
-        return "local"
-    # IP取得不可の場合はセッションIDで代替（リロードでリセットされるが無制限にはならない）
-    if "anon_id" not in st.session_state:
-        import uuid
-        st.session_state["anon_id"] = hashlib.sha256(str(uuid.uuid4()).encode()).hexdigest()[:20]
-    return st.session_state["anon_id"]
+    return "local"
 
 
 def _this_month() -> str:
@@ -738,7 +737,7 @@ def main():
     diag_no = random.randint(100000, 999999)
 
     sb       = _get_sb()
-    ip_hash  = _get_ip_hash()
+    ip_hash  = _get_or_create_uid(sb)
     premium  = _is_premium(sb, ip_hash)
     usage    = _get_usage(sb, ip_hash)
     remaining = max(0, MONTHLY_LIMIT - usage) if not premium else None
