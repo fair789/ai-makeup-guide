@@ -649,7 +649,7 @@ def _this_month() -> str:
 
 def _get_usage(sb, ip_hash: str) -> int:
     if not sb or ip_hash == "local":
-        return 0
+        return st.session_state.get("_local_usage", 0)
     try:
         r = sb.table("usage").select("count").eq("ip_hash", ip_hash).eq("month", _this_month()).execute()
         return r.data[0]["count"] if r.data else 0
@@ -659,6 +659,7 @@ def _get_usage(sb, ip_hash: str) -> int:
 
 def _inc_usage(sb, ip_hash: str):
     if not sb or ip_hash == "local":
+        st.session_state["_local_usage"] = st.session_state.get("_local_usage", 0) + 1
         return
     m = _this_month()
     try:
@@ -673,7 +674,7 @@ def _inc_usage(sb, ip_hash: str):
 
 def _is_premium(sb, ip_hash: str) -> bool:
     if not sb or ip_hash == "local":
-        return True
+        return False  # 確認できない場合はプレミアム扱いにしない
     try:
         today = datetime.date.today().isoformat()
         r = sb.table("premium_ips").select("id").eq("ip_hash", ip_hash).gte("expires_at", today).execute()
@@ -772,7 +773,13 @@ def main():
             st.info(f"残り **{remaining}** 回 / 月{MONTHLY_LIMIT}回")
             st.progress(max(0.0, 1.0 - usage / MONTHLY_LIMIT))
         else:
-            st.info("無料プラン")
+            st.warning("⚠️ DB未接続 — 今セッションのみカウント")
+            st.info(f"残り **{remaining}** 回 / 月{MONTHLY_LIMIT}回")
+
+        # 接続状態（診断用）
+        with st.expander("🔧 接続状態", expanded=False):
+            st.write(f"Supabase: {'✅ 接続中' if sb else '❌ 未接続'}")
+            st.write(f"UID: `{ip_hash[:8] if ip_hash != 'local' else 'local (Cookie失敗)'}`")
 
     # マガジンヘッダー
     st.markdown(f"""
