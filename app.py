@@ -614,9 +614,9 @@ def _get_sb():
         return None
 
 
-def _get_or_create_uid(sb) -> str:
+def _get_or_create_uid(sb, controller=None) -> str:
     """ブラウザCookieで永続ユーザーIDを取得・生成する。"""
-    if not sb:
+    if not sb or controller is None:
         return "local"
 
     # 同一セッション内はキャッシュを返す
@@ -624,7 +624,6 @@ def _get_or_create_uid(sb) -> str:
         return st.session_state["_maid"]
 
     try:
-        controller = CookieController()
         uid = controller.get("_maid")
         if uid:
             st.session_state["_maid"] = uid
@@ -759,8 +758,12 @@ def main():
     api_key = os.environ.get("ANTHROPIC_API_KEY", "") or st.secrets.get("ANTHROPIC_API_KEY", "")
     diag_no = random.randint(100000, 999999)
 
-    sb       = _get_sb()
-    ip_hash  = _get_or_create_uid(sb)
+    sb = _get_sb()
+    try:
+        cookie_ctrl = CookieController() if sb else None
+    except Exception:
+        cookie_ctrl = None
+    ip_hash  = _get_or_create_uid(sb, cookie_ctrl)
     premium  = _is_premium(sb, ip_hash)
     usage    = _get_usage(sb, ip_hash)
     remaining = max(0, MONTHLY_LIMIT - usage) if not premium else None
@@ -795,6 +798,7 @@ def main():
 
     if not premium and usage >= MONTHLY_LIMIT:
         _show_paywall(sb, ip_hash)
+        st.session_state.pop("_karte_result", None)
     else:
         uploaded = st.file_uploader(
             "顔写真をアップロード",
@@ -802,18 +806,31 @@ def main():
             help="正面向き・明るい環境の写真が最適です",
         )
 
+        if not uploaded:
+            st.session_state.pop("_karte_result", None)
+
         if uploaded:
             image = Image.open(uploaded)
             st.image(image, use_container_width=True, caption="アップロード完了")
 
-            if st.button("分析ガイドを作成する", type="primary", use_container_width=True):
-                with st.spinner("AIが分析中… 少々お待ちください"):
-                    if not has_face(image):
-                        st.error("顔を検出できませんでした。正面向きの写真を使用してください。")
-                        return
-                    karte = get_karte(image, api_key)
-                _inc_usage(sb, ip_hash)
-                _display_karte(image, karte, diag_no)
+            if "_karte_result" not in st.session_state:
+                if st.button("分析ガイドを作成する", type="primary", use_container_width=True):
+                    with st.spinner("AIが分析中… 少々お待ちください"):
+                        if not has_face(image):
+                            st.error("顔を検出できませんでした。正面向きの写真を使用してください。")
+                            return
+                        karte = get_karte(image, api_key)
+                    _inc_usage(sb, ip_hash)
+                    karte_diag_no = random.randint(100000, 999999)
+                    st.session_state["_karte_result"] = {"karte": karte, "diag_no": karte_diag_no}
+                    is_last_credit = not premium and (usage + 1) >= MONTHLY_LIMIT
+                    if is_last_credit:
+                        _display_karte(image, karte, karte_diag_no)
+                    else:
+                        st.rerun()
+            else:
+                result = st.session_state["_karte_result"]
+                _display_karte(image, result["karte"], result["diag_no"])
 
     st.markdown(
         '<div class="disclaimer">※ このアプリはエンターテインメント目的のAI診断です。医療行為ではありません。</div>',
