@@ -615,30 +615,47 @@ def _get_sb():
 
 
 def _get_or_create_uid(sb, controller=None) -> str:
-    """ブラウザCookieで永続ユーザーIDを取得・生成する。"""
-    if not sb or controller is None:
+    """ユーザー識別子を取得（IPハッシュ優先、Cookieフォールバック）。"""
+    if not sb:
         return "local"
 
-    # 同一セッション内はキャッシュを返す
     if "_maid" in st.session_state:
         return st.session_state["_maid"]
 
+    # ── 1st: IPアドレスハッシュ（リロードしても絶対に変わらない）──
+    # st.context.headers は Streamlit 1.37+ で使えるサーバーサイドAPI。
+    # ブラウザ通信不要なので初回レンダリングから確実に取得できる。
     try:
-        uid = controller.get("_maid")
-        if uid:
+        hdrs = dict(st.context.headers)
+        # Streamlit Cloud はリバースプロキシ経由なので X-Forwarded-For に実IPが入る
+        forwarded = hdrs.get("X-Forwarded-For", "") or hdrs.get("x-forwarded-for", "")
+        ip = forwarded.split(",")[0].strip()
+        if not ip:
+            ip = hdrs.get("X-Real-Ip", "") or hdrs.get("x-real-ip", "")
+        if ip:
+            uid = "i" + hashlib.sha256(ip.encode()).hexdigest()[:19]
             st.session_state["_maid"] = uid
             return uid
-        # Cookieコンポーネントの初回レンダリング完了を待つ（1回だけ rerun）
-        if not st.session_state.get("_maid_init"):
-            st.session_state["_maid_init"] = True
-            st.rerun()
-        # 2回目のレンダリングでも未取得 → 新規ユーザー
-        new_uid = hashlib.sha256(str(uuid.uuid4()).encode()).hexdigest()[:20]
-        controller.set("_maid", new_uid)
-        st.session_state["_maid"] = new_uid
-        return new_uid
     except Exception:
         pass
+
+    # ── 2nd: Cookie（IPが取れないローカル環境などのフォールバック）──
+    if controller is not None:
+        try:
+            uid = controller.get("_maid")
+            if uid:
+                st.session_state["_maid"] = uid
+                return uid
+            if not st.session_state.get("_maid_init"):
+                st.session_state["_maid_init"] = True
+                st.rerun()
+            new_uid = hashlib.sha256(str(uuid.uuid4()).encode()).hexdigest()[:20]
+            controller.set("_maid", new_uid)
+            st.session_state["_maid"] = new_uid
+            return new_uid
+        except Exception:
+            pass
+
     return "local"
 
 
@@ -782,7 +799,12 @@ def main():
         # 接続状態（診断用）
         with st.expander("🔧 接続状態", expanded=False):
             st.write(f"Supabase: {'✅ 接続中' if sb else '❌ 未接続'}")
-            st.write(f"UID: `{ip_hash[:8] if ip_hash != 'local' else 'local (Cookie失敗)'}`")
+            if ip_hash == "local":
+                st.write("UID: `local`（識別不可）")
+            elif ip_hash.startswith("i"):
+                st.write(f"UID: `{ip_hash[:8]}…`（IPアドレスベース ✅）")
+            else:
+                st.write(f"UID: `{ip_hash[:8]}…`（Cookieベース）")
 
     # マガジンヘッダー
     st.markdown(f"""
