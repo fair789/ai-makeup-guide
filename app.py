@@ -622,7 +622,14 @@ def _get_ip_hash() -> str:
                 return hashlib.sha256(raw.encode()).hexdigest()[:20]
     except Exception:
         pass
-    return "local"
+    # Supabaseが未設定のローカル開発環境のみ"local"を返す
+    if not (st.secrets.get("SUPABASE_URL", "") and st.secrets.get("SUPABASE_SERVICE_KEY", "")):
+        return "local"
+    # IP取得不可の場合はセッションIDで代替（リロードでリセットされるが無制限にはならない）
+    if "anon_id" not in st.session_state:
+        import uuid
+        st.session_state["anon_id"] = hashlib.sha256(str(uuid.uuid4()).encode()).hexdigest()[:20]
+    return st.session_state["anon_id"]
 
 
 def _this_month() -> str:
